@@ -4,11 +4,12 @@ namespace RapTToR\Grok;
 class GrokClient
 {
     private $apiKey;
-    private $client;
     private $baseUrl = 'https://api.x.ai/v1';
+    private $endpoint = '/chat/completions';
+    private $capability = 'text';
     private $lastResponse = null;
     private $systemMessage = null;
-
+    
     private $models = [
         'grok-4' => [
             'modalities' => ['text', 'image'],
@@ -47,7 +48,7 @@ class GrokClient
                 'output' => 0.5  // per million tokens
             ]
         ],
-        'grok-2-image-1212' => [
+        'grok-2-image' => [
             'modalities' => ['text', 'image'],
             'capabilities' => ['image_generation'],
             'context' => 131072,
@@ -64,37 +65,57 @@ class GrokClient
      * Constructor
      *
      * @param string $apiKey xAI API key
+     * @param string $baseUrl Base URL (default: https://api.x.ai/v1)
      */
-    public function __construct(string $apiKey)
+    public function __construct(string $apiKey, ?string $baseUrl = null)
     {
         $this->apiKey = $apiKey;
+        if ($baseUrl) {
+            $this->baseUrl = rtrim($baseUrl, '/');
+        }
+    }
+
+    /**
+     * Set a system message to be automatically prepended to messages.
+     */
+    public function withSystem(string $system): self
+    {
+        $this->systemMessage = $system;
+        return $this;
     }
 
     /**
      * Send a chat completion request to the GROK API
-     *
-     * @param array $messages Array of message objects with role and content
-     * @param string $model Model name (default: grok-4)
-     * @param float $temperature Sampling temperature (default: 0.7)
-     * @param bool $stream Whether to stream response (default: false)
-     * @return $this for chaining
-     * @throws \Exception on API error
      */
-    public function chat(
-        array $messages,
-        string $model = 'grok-4',
-        float $temperature = 0.7,
-        bool $stream = false
-    ) {
+    public function chat($options)
+    {
+        $default = array(
+            'messages' => [],
+            'model' => 'grok-4',
+            'temperature' => 0.7,
+            'stream' => false,  // false||callable method to call for streaming
+            'max_tokens' => 4096,
+        );
+
+        if (is_string($options)) {
+            $options = [
+                'messages' => [
+                    ['role' => 'user', 'content' => $options]
+                ]
+            ];
+        }
+
+        extract($options = array_merge($default, $options));
+
         // suport for sending one message as string;
-        if (is_string($messages))
+        if (isset($messages) && is_string($messages))
             $messages = [[
                 'role' => 'user',
                 'content' => $messages
             ]];
 
         // sport for sending one message content
-        if (is_array($messages) && isset($messages['content']))
+        if (isset($messages) && is_array($messages) && isset($messages['content']))
             $messages = [$messages];
 
         if ($this->systemMessage) {
@@ -109,29 +130,56 @@ class GrokClient
                 $messages[] = ['role' => 'system', 'content' => $this->systemMessage];
             }
         }
+
+        return $this
+            ->endpoint('/chat/completions')
+            ->prompt([
+                'messages' => $messages,
+                'model' => $model,
+                'temperature' => $temperature,
+                'stream' => $stream,
+                'max_tokens' => $max_tokens
+            ]);
+    }
+
+    /**
+     * Summary of prompt
+     * @param mixed $payload
+     * @throws \Exception
+     * @return static
+     */
+    public function prompt($payload)
+    {
+        extract($payload);
         $this->lastResponse = false;
         try {
             $modelData = false;
             if (isset($this->models[$model])) {
                 $modelData = $this->models[$model];
-                if ($modelData && in_array('text', $modelData['modalities'])) {
+                if ($modelData && in_array($this->capability, $modelData['modalities'])) {
                     $headers = [
                         'Authorization: Bearer ' . $this->apiKey,
                         'Content-Type: application/json',
                         'Accept: application/json',
                     ];
 
-                    $payload = [
+                    /* $payload = [
                         'messages' => $messages,
                         'model' => $model,
                         'temperature' => $temperature,
-                        'stream' => $stream,
-                    ];
+                        'stream' => (isset($stream) && $stream) ? true : false,
+                    ]; */
+                    if (isset($stream) && $stream)
+                        $payload['on_chunk'] = $stream;
+                    if (isset($max_tokens) && $max_tokens > 0)
+                        $payload['max_tokens'] = $max_tokens;
+
+                    // var_dump($payload);
 
                     $ch = curl_init();
                     curl_setopt($ch, CURLOPT_TIMEOUT, 3600);
                     curl_setopt($ch, CURLOPT_POST, true);
-                    curl_setopt($ch, CURLOPT_URL, $this->baseUrl . '/chat/completions');
+                    curl_setopt($ch, CURLOPT_URL, $this->baseUrl . $this->endpoint);
                     curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload, JSON_UNESCAPED_SLASHES));
                     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
                     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -149,11 +197,7 @@ class GrokClient
                         throw new \Exception("HTTP $httpCode: " . $response);
                     }
 
-                    $decoded = json_decode($response, true);
-                    if ($decoded === null) {
-                        throw new \Exception('Failed to decode JSON: ' . $response);
-                    }
-                    $this->lastResponse = $decoded;  // <-- store for chaining
+                    $this->lastResponse = $response;  // <-- store for chaining
                 } else {
                 }
             } else {
@@ -176,9 +220,16 @@ class GrokClient
         if (!$this->lastResponse) {
             return $fallback;
         }
+        if (is_string($this->lastResponse)) {
+            $response = json_decode($this->lastResponse, true);
+        }
+
+        if (!$response) {
+            return $fallback;
+        }
 
         // Try the common xAI/OpenAI-style paths:
-        $choice = $this->lastResponse['choices'][$choiceIndex] ?? null;
+        $choice = $response['choices'][$choiceIndex] ?? null;
         if (!$choice)
             return $fallback;
 
@@ -214,9 +265,9 @@ class GrokClient
     /**
      * Get the last response
      */
-    public function response(): array
+    public function response()
     {
-        return $this->lastResponse ?? [];
+        return $this->lastResponse;
     }
 
     /**
@@ -235,5 +286,44 @@ class GrokClient
     ): array {
         $this->chat($messages, $model, $temperature, $stream);
         return ($this->lastResponse) ? $this->response() : false;
+    }
+
+    public function capability($string)
+    {
+        $this->capability = $string;
+        return $this;
+    }
+
+    public function endpoint($string)
+    {
+        $this->endpoint = $string;
+        return $this;
+    }
+
+    /*
+     * based on curl -X 'POST' https://api.x.ai/v1/images/generations \
+     * -H 'accept: application/json' \
+     * -H 'Authorization: Bearer <API_KEY>' \
+     * -H 'Content-Type: application/json' \
+     * -d '{
+     *       "model": "grok-2-image",
+     *       "prompt": "A cat in a tree",
+     *       "response_format": "b64_json"
+     *     }'
+     */
+    public function image(
+        $options,
+    ) {
+        $default = array(
+            'prompt' => 'A cat in a tree',
+            'model' => 'grok-2-image',
+            // 'response_format' => 'b64_json',  // b64_json|url
+            // 'n' => 1,  // number of images
+        );
+        $result = $this
+            ->endpoint('/images/generations')
+            ->capability('image')
+            ->prompt(array_merge($default, $options));
+        return $result;
     }
 }
