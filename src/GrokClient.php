@@ -1,15 +1,26 @@
-<?php
+<?php declare(strict_types=1);
+
 namespace RapTToR\Grok;
 
 class GrokClient
 {
-    private $apiKey;
-    private $baseUrl = 'https://api.x.ai/v1';
-    private $endpoint = '/chat/completions';
+    public int $timeout = 3600;
+    private string $apiKey;
+    private string $baseUrl = 'https://api.x.ai/v1';
+    private string $endpoint = '/chat/completions';  // default endpoint
+    private $endpointImage = '/images/generations';  // default endpoint
+    /** @var 'text'|'image' */
     private $capability = 'text';
-    private $lastResponse = null;
+    /** @var array<string,mixed>|string|null */
+    private ?string $lastResponse = null;
     private $systemMessage = null;
-    
+    private string $model = 'grok-4';
+    /** @var array<string,mixed>|false */
+    private $payload = false;
+
+    /**
+     * Known models + pricing (per M tokens or per image).
+     */
     private $models = [
         'grok-4' => [
             'modalities' => ['text', 'image'],
@@ -61,14 +72,25 @@ class GrokClient
         ]
     ];
 
+    public static function fromEnv(?string $baseUrl = null): self
+    {
+        $apiKey = getenv('XAI_API_KEY');
+        if (!$apiKey) {
+            throw new \RuntimeException('XAI_API_KEY not set in environment');
+        }
+        return new self($apiKey, $baseUrl);
+    }
+
     /**
      * Constructor
      *
      * @param string $apiKey xAI API key
      * @param string $baseUrl Base URL (default: https://api.x.ai/v1)
      */
-    public function __construct(string $apiKey, ?string $baseUrl = null)
-    {
+    public function __construct(
+        string $apiKey,
+        ?string $baseUrl = null
+    ) {
         $this->apiKey = $apiKey;
         if ($baseUrl) {
             $this->baseUrl = rtrim($baseUrl, '/');
@@ -77,6 +99,9 @@ class GrokClient
 
     /**
      * Set a system message to be automatically prepended to messages.
+     *
+     * @param string $system System message
+     * @returns GrokClient
      */
     public function withSystem(string $system): self
     {
@@ -86,8 +111,11 @@ class GrokClient
 
     /**
      * Send a chat completion request to the GROK API
+     *
+     * @param mixed $options String|Array of message objects with role and content
+     * @returns GrokClient
      */
-    public function chat($options)
+    public function chat($options): self
     {
         $default = array(
             'messages' => [],
@@ -127,7 +155,7 @@ class GrokClient
                 }
             }
             if (!$hasSystemMessage) {
-                $messages[] = ['role' => 'system', 'content' => $this->systemMessage];
+                array_unshift($opt['messages'], ['role' => 'system', 'content' => $this->systemMessage]);
             }
         }
 
@@ -142,71 +170,89 @@ class GrokClient
             ]);
     }
 
+    public function validModel()
+    {
+        $model = $this->model;
+        if (!isset($this->models[$model]))
+            throw new \Exception("Model $model is not valid");
+
+        return $this->models[$model];
+    }
+
     /**
      * Summary of prompt
-     * @param mixed $payload
+     * @param mixed $payload string|array by example
      * @throws \Exception
      * @return static
+     *
+     * @param mixed $example =[
+     * 'messages' => [['role' => 'user', 'content' => '']],
+     * 'model' => 'grok-4', // optional, but must be one of $this->models
+     * 'temperature' => 0.7, // optional
+     * 'stream' => false // false||callable method to call for streaming
+     * 'max_tokens' => 4096 // optional
+     * ]
      */
-    public function prompt($payload)
+    public function prompt(array $payload, mixed $example = null): self
     {
         extract($payload);
-        $this->lastResponse = false;
-        try {
-            $modelData = false;
-            if (isset($this->models[$model])) {
-                $modelData = $this->models[$model];
-                if ($modelData && in_array($this->capability, $modelData['modalities'])) {
-                    $headers = [
-                        'Authorization: Bearer ' . $this->apiKey,
-                        'Content-Type: application/json',
-                        'Accept: application/json',
-                    ];
+        if (isset($payload['model']))  // set object model from parameters, for debugging
+            $this->model($model = $payload['model']);
+        $this->lastResponse = null;
+        $modelData = $this->validModel();
 
-                    /* $payload = [
-                        'messages' => $messages,
-                        'model' => $model,
-                        'temperature' => $temperature,
-                        'stream' => (isset($stream) && $stream) ? true : false,
-                    ]; */
-                    if (isset($stream) && $stream)
-                        $payload['on_chunk'] = $stream;
-                    if (isset($max_tokens) && $max_tokens > 0)
-                        $payload['max_tokens'] = $max_tokens;
+        if ($modelData && in_array($this->capability, $modelData['modalities'])) {
+            if (isset($stream) && $stream)
+                $payload['on_chunk'] = $stream;
 
-                    // var_dump($payload);
+            if (isset($max_tokens) && $max_tokens > 0)
+                $payload['max_tokens'] = $max_tokens;
 
-                    $ch = curl_init();
-                    curl_setopt($ch, CURLOPT_TIMEOUT, 3600);
-                    curl_setopt($ch, CURLOPT_POST, true);
-                    curl_setopt($ch, CURLOPT_URL, $this->baseUrl . $this->endpoint);
-                    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload, JSON_UNESCAPED_SLASHES));
-                    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-                    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            $this->payload = $payload;
 
-                    $response = curl_exec($ch);
-                    $curlErr = curl_error($ch);
-                    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-                    curl_close($ch);
-
-                    if ($curlErr) {
-                        throw new \Exception('cURL error: ' . $curlErr);
-                    }
-                    if ($httpCode < 200 || $httpCode >= 300) {
-                        // include body for easier debugging
-                        throw new \Exception("HTTP $httpCode: " . $response);
-                    }
-
-                    $this->lastResponse = $response;  // <-- store for chaining
-                } else {
-                }
-            } else {
-                throw new \Exception('Invalid model name: ' . $model);
-            }
-        } catch (\Exception $e) {
-            throw new \Exception('API error: ' . $e->getMessage());
+            $response = $this->call();
+            // do not convert response, as it may not be json always.
+            $this->lastResponse = $response;  // <-- store for chaining
+        } else {
+            throw new \Exception("Model $model does not support capability $this->capability");
         }
         return $this;
+    }
+
+    /**
+     * Call the API
+     * @throws \Exception
+     * @return bool|string
+     */
+    public function call()
+    {
+        $headers = [
+            'Authorization: Bearer ' . $this->apiKey,
+            'Content-Type: application/json',
+            'Accept: application/json',
+        ];
+
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_TIMEOUT, $this->timeout);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_URL, $this->baseUrl . $this->endpoint);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($this->payload, JSON_UNESCAPED_SLASHES));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+
+        $response = curl_exec($ch);
+        $curlErr = curl_error($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($curlErr) {
+            throw new \Exception('cURL error: ' . $curlErr);
+        }
+        if ($httpCode < 200 || $httpCode >= 300) {
+            // include body for easier debugging
+            throw new \Exception("HTTP $httpCode: " . $response);
+        }
+        return $response;
     }
 
     /*
@@ -278,38 +324,64 @@ class GrokClient
         return $this->lastResponse['id'] ?? null;
     }
 
+    /*
+     * Raw request
+     *
+     * @param array $messages
+     * @param string $model
+     * @param float $temperature
+     * @param bool $stream
+     * @return array
+     */
+
     public function raw(
         array $messages,
         string $model = 'grok-4',
         float $temperature = 0.7,
         bool $stream = false
     ): array {
-        $this->chat($messages, $model, $temperature, $stream);
+        $this->chat([
+            'messages' => $messages,
+            'model' => $model,
+            'temperature' => $temperature,
+            'stream' => $stream
+        ]);
         return ($this->lastResponse) ? $this->response() : false;
     }
 
-    public function capability($string)
+    /**
+     * Set capability
+     * @param mixed $string
+     * @return static
+     */
+    public function capability($string): self
     {
         $this->capability = $string;
         return $this;
     }
 
-    public function endpoint($string)
+    /**
+     * Set endpoint
+     * @param mixed $string
+     * @return static
+     */
+    public function endpoint($string): self
     {
         $this->endpoint = $string;
         return $this;
     }
 
     /*
-     * based on curl -X 'POST' https://api.x.ai/v1/images/generations \
-     * -H 'accept: application/json' \
-     * -H 'Authorization: Bearer <API_KEY>' \
-     * -H 'Content-Type: application/json' \
-     * -d '{
-     *       "model": "grok-2-image",
-     *       "prompt": "A cat in a tree",
-     *       "response_format": "b64_json"
-     *     }'
+     * Helper: generate an image
+     *
+     * @param array $options Options = [ // all optional except 'prompt'
+     *     'prompt' => 'A cat in a tree',
+     *     'model' => 'grok-2-image',
+     *     'response_format' => 'b64_json',  // b64_json|url
+     *     'n' => 1,  // number of images
+     * ]
+     *
+     * @return GrokClient
      */
     public function image(
         $options,
@@ -321,9 +393,95 @@ class GrokClient
             // 'n' => 1,  // number of images
         );
         $result = $this
-            ->endpoint('/images/generations')
+            ->model($options['model'] ?? $default['model'])
+            ->imageEndpoint()
             ->capability('image')
             ->prompt(array_merge($default, $options));
         return $result;
+    }
+
+    /**
+     * Summary of model
+     * @param mixed $model
+     * @return static
+     */
+    public function model($model): self
+    {
+        $this->model = $model;
+        return $this;
+    }
+
+    /*
+     * Helper: analyze an image
+     * $options=[
+     * 'prompt' => 'Analyze this image',
+     * 'image' => '<base64_image_string>',
+     * 'detail' => 'high',  // high|auto|low
+     * ]
+     */
+    public function analyze($options): self
+    {
+        $default = [
+            'prompt' => 'Analyze this image',
+            'image' => '<base64_image_string>',
+            'detail' => 'high',  // high|auto|low
+        ];
+        extract($options = array_merge($default, $options));
+        $result = $this
+            ->chat([
+                [
+                    'role' => 'user',
+                    'content' => [
+                        [
+                            'type' => 'image_url',
+                            'image_url' => [
+                                'url' => 'data:image/jpeg;base64,' . $image,
+                                'detail' => $detail,
+                            ],
+                        ],
+                        [
+                            'type' => 'text',
+                            'text' => $prompt,
+                        ],
+                    ],
+                ]
+            ]);
+
+        return $this;
+    }
+
+    /**
+     * Set endpoint to image, enables chaining
+     *
+     * @return static
+     */
+    public function imageEndpoint(): self
+    {
+        $this->endpoint = $this->endpointImage;
+        return $this;
+    }
+
+    /**
+     * Rough cost estimate in USD based on model pricing table.
+     * Provide token counts (not chars). Example:
+     *   $client->costEstimate(inTokens: 12_000, outTokens: 2_000);
+     */
+    public function costEstimate(?int $inTokens = null, ?int $outTokens = null, int $images = 0): float
+    {
+        $m = $this->validModel();
+        $pricing = $m['pricing'] ?? [];
+
+        $cost = 0.0;
+        if ($inTokens !== null && isset($pricing['input'])) {
+            $cost += ($inTokens / 1_000_000) * (float) $pricing['input'];
+        }
+        if ($outTokens !== null && isset($pricing['output'])) {
+            $cost += ($outTokens / 1_000_000) * (float) $pricing['output'];
+        }
+        if ($images > 0 && isset($pricing['output']) && !isset($pricing['input'])) {
+            // image model: per-image output price
+            $cost += $images * (float) $pricing['output'];
+        }
+        return round($cost, 6);
     }
 }

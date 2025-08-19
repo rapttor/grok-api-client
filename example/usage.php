@@ -1,6 +1,7 @@
 <?php
-$image = false;
+$image = true;
 $text = true;
+$analyze = true;
 
 require __DIR__ . '/../vendor/autoload.php';
 include_once __DIR__ . '/../src/GrokClient.php';
@@ -34,6 +35,35 @@ if ($image)
             ->image(['prompt' => 'A cat in a tree']);
 
         $response = $image->response();
+
+        var_dump('RESPONSE:', $response);
+    } catch (Exception $e) {
+        echo 'Error: ' . $e->getMessage();
+    }
+
+if ($analyze)
+    try {  // content set of image, text
+        $analyze = $grok
+            ->chat([
+                [
+                    'role' => 'user',
+                    'content' => [
+                        [
+                            'type' => 'image_url',
+                            'image_url' => [
+                                'url' => 'data:image/jpeg;base64,<base64_image_string>',
+                                'detail' => 'high',
+                            ],
+                        ],
+                        [
+                            'type' => 'text',
+                            'text' => 'What is in this image?',
+                        ],
+                    ],
+                ]
+            ]);
+
+        $response = $analyze->response();
 
         var_dump('RESPONSE:', $response);
     } catch (Exception $e) {
