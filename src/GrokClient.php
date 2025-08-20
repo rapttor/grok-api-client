@@ -155,7 +155,8 @@ class GrokClient
                 }
             }
             if (!$hasSystemMessage) {
-                array_unshift($opt['messages'], ['role' => 'system', 'content' => $this->systemMessage]);
+                // array_unshift($opt['messages'], ['role' => 'system', 'content' => $this->systemMessage]);
+                $messages = array_merge([['role' => 'system', 'content' => $this->systemMessage]], $messages);
             }
         }
 
